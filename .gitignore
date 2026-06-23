@@ -1,5 +1,8 @@
 # Visual Studio 2015 user specific files
 .vs/
+.idea/
+.vscode/
+.fleet/
 
 # Compiled Object files
 *.slo
@@ -73,3 +76,16 @@ Plugins/**/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+.idea/.idea.ChemicalBond.dir/.idea/.name
+.idea/.idea.ChemicalBond.dir/.idea/encodings.xml
+.idea/.idea.ChemicalBond.dir/.idea/indexLayout.xml
+.idea/.idea.ChemicalBond.dir/.idea/vcs.xml
+
+# Iwata local governance outputs
+DesignDocumentations/
+DesignArchives/
+IwataGenerated/
+IwataPdfExtract*.txt
+scripts/iwata-*.ps1
+scripts/iwata-*.py
+scripts/iwata-*.md
