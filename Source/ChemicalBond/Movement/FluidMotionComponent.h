@@ -86,7 +86,7 @@ protected:
 	// 蓝图配置：Class=玩家基团、游离原子、待决策基团，Range=0.0..100000.0，
 	// Effect=持续移动输入产生的基础推进力。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="ChemicalBond|FluidMotion|Force", meta=(ClampMin="0.0"))
-	float MoveForce = 4800.f;
+	float MoveForce = 7600.f;
 
 	// 蓝图配置：Class=玩家基团，Range=0.0..100000.0，
 	// Effect=冲刺开启时额外叠加在移动方向上的推进力。
