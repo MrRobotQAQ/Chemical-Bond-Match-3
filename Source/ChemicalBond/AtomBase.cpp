@@ -1,5 +1,7 @@
 #include "AtomBase.h"
 
+#include "Movement/FluidMotionComponent.h"
+
 AAtomBase::AAtomBase()
 {
     PrimaryActorTick.bCanEverTick = false;
@@ -12,6 +14,8 @@ AAtomBase::AAtomBase()
     ProximitySphere->SetSphereRadius(200.f);
     ProximitySphere->SetCollisionProfileName(TEXT("OverlapAll"));
     ProximitySphere->SetGenerateOverlapEvents(true);
+
+    FluidMotionComponent = CreateDefaultSubobject<UFluidMotionComponent>(TEXT("FluidMotionComponent"));
 }
 
 void AAtomBase::BeginPlay()
@@ -28,6 +32,11 @@ void AAtomBase::InitFromDataTable()
 {
     if (!AtomDataTable)
     {
+        if (TotalSlots > 0)
+        {
+            return;
+        }
+
         UE_LOG(LogTemp, Warning, TEXT("AAtomBase [%s]: AtomDataTable 未设置"), *GetName());
         return;
     }
@@ -50,11 +59,22 @@ void AAtomBase::InitFromDataTable()
         return;
     }
 
-    Mass       = Row->Mass;
-    TotalSlots = Row->TotalSlots;
-    bCanFormRing = Row->bCanFormRing;
+    ApplyRuntimeAtomData(ElementType, Row->Mass, Row->TotalSlots, Row->bCanFormRing);
+}
+
+void AAtomBase::ApplyRuntimeAtomData(EAtomElementType InElementType, float InMass, int32 InTotalSlots, bool bInCanFormRing)
+{
+    ElementType = InElementType;
+    Mass = InMass;
+    TotalSlots = FMath::Max(0, InTotalSlots);
+    bCanFormRing = bInCanFormRing;
 
     SlotOccupied.Init(false, TotalSlots);
+
+    if (FluidMotionComponent)
+    {
+        FluidMotionComponent->SetEffectiveMass(Mass);
+    }
 }
 
 int32 AAtomBase::GetAvailableSlotCount() const

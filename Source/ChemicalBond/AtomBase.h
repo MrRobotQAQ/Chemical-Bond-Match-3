@@ -7,6 +7,7 @@
 #include "AtomBase.generated.h"
 
 class AAtomBase;
+class UFluidMotionComponent;
 
 // 存在原子上的单条键记录
 USTRUCT(BlueprintType)
@@ -41,6 +42,8 @@ public:
 
 protected:
     virtual void BeginPlay() override;
+
+    void ApplyRuntimeAtomData(EAtomElementType InElementType, float InMass, int32 InTotalSlots, bool bInCanFormRing);
 
     // -----------------------------------------------------------------------
     // 配置属性（在 Blueprint 子类的 Default 面板中设置）
@@ -105,6 +108,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "原子|查询")
     EAtomElementType GetElementType() const { return ElementType; }
 
+    UFUNCTION(BlueprintCallable, Category = "原子|查询")
+    UFluidMotionComponent* GetFluidMotionComponent() const { return FluidMotionComponent; }
+
     // -----------------------------------------------------------------------
     // Blueprint 可调用方法 — 槽位与键操作
     // -----------------------------------------------------------------------
@@ -126,6 +132,9 @@ public:
 private:
     UPROPERTY()
     USphereComponent* ProximitySphere = nullptr;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "原子|运动", meta = (AllowPrivateAccess = "true"))
+    UFluidMotionComponent* FluidMotionComponent = nullptr;
 
     // 槽位占用状态，长度 = TotalSlots，由 InitFromDataTable 初始化
     UPROPERTY()
