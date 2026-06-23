@@ -1,0 +1,133 @@
+#include "AtomBase.h"
+
+AAtomBase::AAtomBase()
+{
+    PrimaryActorTick.bCanEverTick = false;
+
+    USceneComponent* Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+    RootComponent = Root;
+
+    ProximitySphere = CreateDefaultSubobject<USphereComponent>(TEXT("ProximitySphere"));
+    ProximitySphere->SetupAttachment(RootComponent);
+    ProximitySphere->SetSphereRadius(200.f);
+    ProximitySphere->SetCollisionProfileName(TEXT("OverlapAll"));
+    ProximitySphere->SetGenerateOverlapEvents(true);
+}
+
+void AAtomBase::BeginPlay()
+{
+    Super::BeginPlay();
+    InitFromDataTable();
+
+    ProximitySphere->SetSphereRadius(ProximityRadius);
+    ProximitySphere->OnComponentBeginOverlap.AddDynamic(
+        this, &AAtomBase::HandleProximitySphereOverlap);
+}
+
+void AAtomBase::InitFromDataTable()
+{
+    if (!AtomDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("AAtomBase [%s]: AtomDataTable 未设置"), *GetName());
+        return;
+    }
+
+    // EAtomElementType 枚举值名称（如 "C_Normal"）直接用作 DataTable RowName
+    FString FullName = UEnum::GetValueAsString(ElementType);
+    FString RowNameStr;
+    if (!FullName.Split(TEXT("::"), nullptr, &RowNameStr, ESearchCase::IgnoreCase, ESearchDir::FromEnd))
+    {
+        RowNameStr = FullName;
+    }
+
+    const FAtomDataRow* Row = AtomDataTable->FindRow<FAtomDataRow>(
+        FName(*RowNameStr), TEXT("AAtomBase::InitFromDataTable"));
+
+    if (!Row)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("AAtomBase [%s]: DataTable 中找不到行 [%s]"), *GetName(), *RowNameStr);
+        return;
+    }
+
+    Mass       = Row->Mass;
+    TotalSlots = Row->TotalSlots;
+    bCanFormRing = Row->bCanFormRing;
+
+    SlotOccupied.Init(false, TotalSlots);
+}
+
+int32 AAtomBase::GetAvailableSlotCount() const
+{
+    int32 Count = 0;
+    for (bool bOccupied : SlotOccupied)
+    {
+        if (!bOccupied) ++Count;
+    }
+    return Count;
+}
+
+int32 AAtomBase::FindFreeSlotIndex() const
+{
+    for (int32 i = 0; i < SlotOccupied.Num(); ++i)
+    {
+        if (!SlotOccupied[i]) return i;
+    }
+    return INDEX_NONE;
+}
+
+bool AAtomBase::AddBond(AAtomBase* Partner, EBondType InBondType, int32 MySlot, int32 PartnerSlot)
+{
+    if (!Partner) return false;
+    if (MySlot < 0 || MySlot >= TotalSlots) return false;
+    if (SlotOccupied[MySlot]) return false;
+
+    SlotOccupied[MySlot] = true;
+
+    FBondRecord Record;
+    Record.PartnerAtom     = Partner;
+    Record.BondType        = InBondType;
+    Record.MySlotIndex     = MySlot;
+    Record.PartnerSlotIndex = PartnerSlot;
+    Bonds.Add(Record);
+
+    return true;
+}
+
+bool AAtomBase::RemoveBond(int32 MySlotIndex)
+{
+    if (MySlotIndex < 0 || MySlotIndex >= TotalSlots) return false;
+    if (!SlotOccupied[MySlotIndex]) return false;
+
+    SlotOccupied[MySlotIndex] = false;
+
+    for (int32 i = Bonds.Num() - 1; i >= 0; --i)
+    {
+        if (Bonds[i].MySlotIndex == MySlotIndex)
+        {
+            Bonds.RemoveAt(i);
+            break;
+        }
+    }
+    return true;
+}
+
+void AAtomBase::SetAtomState(EAtomState NewState)
+{
+    AtomState = NewState;
+    OnAtomStateChanged(NewState);
+}
+
+void AAtomBase::HandleProximitySphereOverlap(
+    UPrimitiveComponent* OverlappedComponent,
+    AActor* OtherActor,
+    UPrimitiveComponent* OtherComp,
+    int32 OtherBodyIndex,
+    bool bFromSweep,
+    const FHitResult& SweepResult)
+{
+    if (AAtomBase* OtherAtom = Cast<AAtomBase>(OtherActor))
+    {
+        OnProximityEnter.Broadcast(OtherAtom);
+    }
+}
