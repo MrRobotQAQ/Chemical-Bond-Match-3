@@ -191,7 +191,11 @@ public:
 	static FVector GetViewBoxRange(UCameraComponent* Camera,float SpringArmLength,float DeltaTime);
 	
 	UFUNCTION(BlueprintCallable, Category="BoxRange")
-	static TArray<FVector> SplitBoxRange(FVector BigBoxHalfSize,FVector& SubBoxHalfSize,uint8 SplitNum=2);
+	static TArray<FVector> GetGridCenters(const FVector Center, const FVector Extent,FVector& SubBoxExtent);
+	
+	UFUNCTION(BlueprintCallable, Category="BoxRange")
+	static void  RefreshAllRegionGuide( TArray<FVector> SubBoxsCenter, FVector& MainGuide,
+												TArray<FVector>& SubGuide,TArray<FVector>& WeakGuide,TArray<FVector>&  NoneGuide);
 	
 	
 	bool ValidateBondRegistryConsistency(FString& OutError) const;
