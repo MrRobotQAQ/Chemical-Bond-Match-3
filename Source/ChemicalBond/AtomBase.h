@@ -9,6 +9,8 @@
 class AAtomBase;
 class UFluidMotionComponent;
 class UStaticMeshComponent;
+class UMaterialInterface;
+class UStaticMesh;
 
 // 存在原子上的单条键记录
 USTRUCT(BlueprintType)
@@ -110,9 +112,18 @@ public:
     UFUNCTION(BlueprintCallable, Category = "原子|查询")
     int32 GetAvailableSlotCount() const;
 
+    UFUNCTION(BlueprintCallable, Category = "原子|查询")
+    int32 GetTotalSlotCount() const { return TotalSlots; }
+
+    UFUNCTION(BlueprintCallable, Category = "原子|查询")
+    bool IsSlotOccupied(int32 SlotIndex) const;
+
     // 返回第一个空闲槽位的索引，无空槽时返回 INDEX_NONE
     UFUNCTION(BlueprintCallable, Category = "原子|查询")
     int32 FindFreeSlotIndex() const;
+
+    UFUNCTION(BlueprintCallable, Category = "原子|查询")
+    int32 FindNearestFreeSlotIndexToWorldLocation(FVector WorldLocation) const;
 
     UFUNCTION(BlueprintCallable, Category = "原子|查询")
     float GetMass() const { return Mass; }
@@ -143,6 +154,18 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "原子|查询")
     float GetProximityRadius() const { return ProximityRadius; }
+
+    UFUNCTION(BlueprintCallable, Category = "原子|查询")
+    FVector GetSlotWorldLocation(int32 SlotIndex) const;
+
+    UFUNCTION(BlueprintCallable, Category = "原子|查询")
+    FVector GetSlotWorldOffset(int32 SlotIndex) const;
+
+    UFUNCTION(BlueprintCallable, Category = "原子|查询")
+    float GetSlotConnectionDistance() const { return AtomBodyDiameter; }
+
+    UFUNCTION(BlueprintCallable, Category = "原子|查询")
+    float GetSlotBaseAngleDegrees(int32 SlotIndex) const;
 
     UFUNCTION(BlueprintCallable, Category = "原子|查询")
     bool IsInteractionCoolingDown() const;
@@ -192,12 +215,27 @@ public:
     UFUNCTION(BlueprintCallable, Category = "原子|状态")
     void BeginInteractionCooldown(float CooldownSeconds);
 
+    UFUNCTION(BlueprintCallable, Category = "原子|表现")
+    void RefreshSlotVisualLayout();
+
+    UFUNCTION(BlueprintCallable, Category = "原子|表现")
+    void NotifyBondLayoutChanged();
+
 private:
     UPROPERTY()
     USphereComponent* ProximitySphere = nullptr;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "原子|交互范围", meta = (AllowPrivateAccess = "true"))
     UStaticMeshComponent* ProximityVisualMesh = nullptr;
+
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<UStaticMeshComponent>> SlotVisualMeshes;
+
+    UPROPERTY()
+    TObjectPtr<UStaticMesh> SlotSphereMesh = nullptr;
+
+    UPROPERTY()
+    TObjectPtr<UMaterialInterface> SlotVisualMaterial = nullptr;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "原子|运动", meta = (AllowPrivateAccess = "true"))
     UFluidMotionComponent* FluidMotionComponent = nullptr;
@@ -221,10 +259,33 @@ private:
     UPROPERTY(Transient)
     float InteractionCooldownEndTime = 0.f;
 
+    // 蓝图配置：Class=原子 Blueprint 派生类，Range=1.0..1000.0，
+    // Effect=定义原子本体直径，并作为槽位球尺寸和槽位对齐距离的基准。
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "原子|槽位表现", meta = (AllowPrivateAccess = "true", ClampMin = "1.0"))
+    float AtomBodyDiameter = 65.f;
+
+    // 蓝图配置：Class=原子 Blueprint 派生类，Range=0.0..1000.0，
+    // Effect=槽位球中心到原子中心的固定轨道距离 d，运行时不得被滑动逻辑改变。
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "原子|槽位表现", meta = (AllowPrivateAccess = "true", ClampMin = "0.0"))
+    float SlotOrbitDistance = 55.f;
+
+    // 蓝图配置：Class=原子 Blueprint 派生类，Range=0.01..1.0，
+    // Effect=槽位球直径相对原子本体直径的比例，正式规则默认为 0.3。
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "原子|槽位表现", meta = (AllowPrivateAccess = "true", ClampMin = "0.01", ClampMax = "1.0"))
+    float SlotSphereDiameterRatio = 0.3f;
+
+    // 蓝图配置：Class=原子 Blueprint 派生类，Range=0.0..90.0 度，
+    // Effect=双键/三键槽位滑向成键侧后围绕朝向的展开角。
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "原子|槽位表现", meta = (AllowPrivateAccess = "true", ClampMin = "0.0", ClampMax = "90.0"))
+    float MultiBondSlotSpreadDegrees = 20.f;
+
     void InitFromDataTable();
     void ApplyTemporaryInteractionRadiusFromMass();
     void RefreshProximityVisual();
     void DrawProximityIndicator();
+    void RebuildSlotVisualMeshes();
+    FVector GetSlotRelativeLocation(int32 SlotIndex) const;
+    bool TryGetMultiBondSlotAngleDegrees(int32 SlotIndex, float& OutAngleDegrees) const;
     void TryRegisterWithDirector();
     void TryUnregisterFromDirector();
 

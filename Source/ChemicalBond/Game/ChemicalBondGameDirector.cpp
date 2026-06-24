@@ -11,6 +11,11 @@
 #include "Camera/CameraComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "NiagaraComponent.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
+#include "Components/SceneComponent.h"
+#include "UObject/ConstructorHelpers.h"
 
 DEFINE_LOG_CATEGORY(LogChemicalBondDirector);
 
@@ -21,6 +26,43 @@ constexpr float TemporaryConnectedAtomDistance = 90.f;
 constexpr float ConnectionConstraintTolerance = 1.f;
 constexpr float PendingConnectionPullAlpha = 0.18f;
 constexpr float PendingConnectionMaxStep = 30.f;
+
+float GetPlanarYawDegrees(FVector Direction)
+{
+	Direction = ChemicalBondGameplayPlane::ProjectVector(Direction);
+	if (Direction.IsNearlyZero())
+	{
+		Direction = FVector::ForwardVector;
+	}
+
+	return FMath::RadiansToDegrees(FMath::Atan2(Direction.Y, Direction.X));
+}
+
+FVector MakePlanarDirectionFromYaw(float YawDegrees)
+{
+	const float YawRadians = FMath::DegreesToRadians(YawDegrees);
+	return FVector(FMath::Cos(YawRadians), FMath::Sin(YawRadians), 0.f).GetSafeNormal();
+}
+
+float FindShortestAngleDegrees(float FromDegrees, float ToDegrees)
+{
+	return FMath::FindDeltaAngleDegrees(FromDegrees, ToDegrees);
+}
+
+FVector FindWeightedFacingDirection(AAtomBase* AtomA, int32 AtomASlot, AAtomBase* AtomB, int32 AtomBSlot)
+{
+	if (!AtomA || !AtomB)
+	{
+		return FVector::ForwardVector;
+	}
+
+	const float AtomAAngle = GetPlanarYawDegrees(AtomA->GetSlotWorldOffset(AtomASlot));
+	const float AtomBAsAtomAAngle = GetPlanarYawDegrees(-AtomB->GetSlotWorldOffset(AtomBSlot));
+	const float TotalMass = FMath::Max(AtomA->GetMass(), 1.f) + FMath::Max(AtomB->GetMass(), 1.f);
+	const float AtomBInfluence = FMath::Max(AtomB->GetMass(), 1.f) / TotalMass;
+	const float BlendedAngle = AtomAAngle + FindShortestAngleDegrees(AtomAAngle, AtomBAsAtomAAngle) * AtomBInfluence;
+	return MakePlanarDirectionFromYaw(BlendedAngle);
+}
 
 bool TryGetAtomBondRecord(const AAtomBase* Atom, FGuid BondUid, FBondRecord& OutRecord)
 {
@@ -48,6 +90,20 @@ AChemicalBondGameDirector::AChemicalBondGameDirector()
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = false;
 	PrimaryActorTick.TickGroup = TG_PostPhysics;
+
+	static ConstructorHelpers::FObjectFinder<UNiagaraSystem> BondVisualAsset(
+		TEXT("/Game/VFX/huaxuejian/NS_LianJie.NS_LianJie"));
+	if (BondVisualAsset.Succeeded())
+	{
+		BondVisualSystem = BondVisualAsset.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<UNiagaraSystem> DecisionWarningVisualAsset(
+		TEXT("/Game/VFX/warning/NS_Warning.NS_Warning"));
+	if (DecisionWarningVisualAsset.Succeeded())
+	{
+		DecisionWarningVisualSystem = DecisionWarningVisualAsset.Object;
+	}
 }
 
 void AChemicalBondGameDirector::BeginPlay()
@@ -69,6 +125,8 @@ void AChemicalBondGameDirector::Tick(float DeltaSeconds)
 	ProcessConnectionCandidates(DeltaSeconds);
 	ProcessActiveDecision(DeltaSeconds);
 	ProcessPhysicalConnections(DeltaSeconds);
+	UpdateAllBondVisuals();
+	SpawnOrUpdateActiveDecisionWarningVisual();
 	ConstrainRegisteredAtomsToGameplayPlane();
 }
 
@@ -120,6 +178,19 @@ void AChemicalBondGameDirector::StopDirector()
 	QueuedDecisionPairKeys.Reset();
 	LockedAtomUids.Reset();
 	RigidGroupLocalTransforms.Reset();
+	for (TPair<FGuid, FBondVisualComponentList>& VisualPair : BondVisualComponents)
+	{
+		for (TObjectPtr<UNiagaraComponent>& BondVisualComponent : VisualPair.Value.Components)
+		{
+			if (BondVisualComponent)
+			{
+				BondVisualComponent->Deactivate();
+				BondVisualComponent->DestroyComponent();
+			}
+		}
+	}
+	BondVisualComponents.Reset();
+	DestroyActiveDecisionWarningVisual();
 	bHasActiveDecisionRequest = false;
 }
 
@@ -310,6 +381,8 @@ FGuid AChemicalBondGameDirector::LinkAtoms(
 
 	BondRegistry.Add(BondUid, Record);
 	AddBondUidToTypeList(BondUid, BondType);
+	RefreshAtomBondLayouts(AtomA, AtomB);
+	SpawnOrUpdateBondVisual(BondUid);
 	AssertBondRegistryConsistency();
 	return BondUid;
 }
@@ -330,6 +403,7 @@ bool AChemicalBondGameDirector::CutBond(FGuid BondUid)
 	}
 
 	RemoveBondUidFromTypeList(BondUid, Record.BondType);
+	DestroyBondVisual(BondUid);
 	AAtomBase* AtomA = Record.AtomA.Get();
 	AAtomBase* AtomB = Record.AtomB.Get();
 
@@ -343,6 +417,7 @@ bool AChemicalBondGameDirector::CutBond(FGuid BondUid)
 		AtomB->RemoveBondByUid(BondUid);
 	}
 
+	RefreshAtomBondLayouts(AtomA, AtomB);
 	ApplyGentleRepulsion(AtomA, AtomB, TEXT("CutBond"));
 	AssertBondRegistryConsistency();
 	return true;
@@ -1198,6 +1273,14 @@ void AChemicalBondGameDirector::ApplyConnectionPullConstraint(
 		return;
 	}
 
+	int32 AnchorSlot = INDEX_NONE;
+	int32 PulledSlot = INDEX_NONE;
+	if (FindClosestFreeSlotPair(AnchorAtom, PulledAtom, AnchorSlot, PulledSlot))
+	{
+		AlignAtomsForSlotConnection(AnchorAtom, AnchorSlot, PulledAtom, PulledSlot, Reason);
+		return;
+	}
+
 	AnchorAtom->ConstrainToGameplayPlane();
 	PulledAtom->ConstrainToGameplayPlane();
 
@@ -1237,6 +1320,442 @@ void AChemicalBondGameDirector::ApplyConnectionPullConstraint(
 		Reason ? Reason : TEXT("Unknown"),
 		PullDelta.Size(),
 		Step.Size());
+}
+
+bool AChemicalBondGameDirector::FindClosestFreeSlotPair(
+	AAtomBase* AtomA,
+	AAtomBase* AtomB,
+	int32& OutAtomASlot,
+	int32& OutAtomBSlot) const
+{
+	OutAtomASlot = INDEX_NONE;
+	OutAtomBSlot = INDEX_NONE;
+	if (!AtomA)
+	{
+		return false;
+	}
+	if (!AtomB)
+	{
+		return false;
+	}
+
+	float BestDistanceSquared = TNumericLimits<float>::Max();
+	for (int32 AtomASlot = 0; AtomASlot < AtomA->GetTotalSlotCount(); ++AtomASlot)
+	{
+		if (AtomA->IsSlotOccupied(AtomASlot))
+		{
+			continue;
+		}
+
+		const FVector AtomASlotLocation = AtomA->GetSlotWorldLocation(AtomASlot);
+		for (int32 AtomBSlot = 0; AtomBSlot < AtomB->GetTotalSlotCount(); ++AtomBSlot)
+		{
+			if (AtomB->IsSlotOccupied(AtomBSlot))
+			{
+				continue;
+			}
+
+			const float DistanceSquared = FVector::DistSquared(
+				AtomASlotLocation,
+				AtomB->GetSlotWorldLocation(AtomBSlot));
+			if (DistanceSquared < BestDistanceSquared)
+			{
+				BestDistanceSquared = DistanceSquared;
+				OutAtomASlot = AtomASlot;
+				OutAtomBSlot = AtomBSlot;
+			}
+		}
+	}
+
+	return OutAtomASlot != INDEX_NONE && OutAtomBSlot != INDEX_NONE;
+}
+
+void AChemicalBondGameDirector::AlignAtomsForSlotConnection(
+	AAtomBase* AtomA,
+	int32 AtomASlot,
+	AAtomBase* AtomB,
+	int32 AtomBSlot,
+	const TCHAR* Reason)
+{
+	if (!AtomA)
+	{
+		return;
+	}
+	if (!AtomB)
+	{
+		return;
+	}
+	if (AtomA == AtomB)
+	{
+		return;
+	}
+
+	AtomA->ConstrainToGameplayPlane();
+	AtomB->ConstrainToGameplayPlane();
+
+	const bool bAtomAAnchored =
+		AtomA->IsPlayerControlled()
+		|| (AtomA->GetAtomState() == EAtomState::PlayerConnected && AtomB->GetAtomState() != EAtomState::PlayerConnected);
+	const bool bAtomBAnchored =
+		AtomB->IsPlayerControlled()
+		|| (AtomB->GetAtomState() == EAtomState::PlayerConnected && AtomA->GetAtomState() != EAtomState::PlayerConnected);
+
+	FVector DirectionFromAToB = FVector::ForwardVector;
+	if (bAtomAAnchored && !bAtomBAnchored)
+	{
+		DirectionFromAToB = AtomA->GetSlotWorldOffset(AtomASlot);
+	}
+	else if (bAtomBAnchored && !bAtomAAnchored)
+	{
+		DirectionFromAToB = -AtomB->GetSlotWorldOffset(AtomBSlot);
+	}
+	else
+	{
+		DirectionFromAToB = FindWeightedFacingDirection(AtomA, AtomASlot, AtomB, AtomBSlot);
+	}
+
+	DirectionFromAToB = ChemicalBondGameplayPlane::ProjectVector(DirectionFromAToB);
+	if (DirectionFromAToB.IsNearlyZero())
+	{
+		DirectionFromAToB =
+			ChemicalBondGameplayPlane::ProjectLocation(AtomB->GetActorLocation()) -
+			ChemicalBondGameplayPlane::ProjectLocation(AtomA->GetActorLocation());
+	}
+	if (DirectionFromAToB.IsNearlyZero())
+	{
+		DirectionFromAToB = FVector::ForwardVector;
+	}
+	DirectionFromAToB = DirectionFromAToB.GetSafeNormal();
+
+	auto SetAtomYawForSlotDirection = [](AAtomBase* Atom, int32 SlotIndex, FVector DesiredSlotDirection)
+	{
+		if (!Atom)
+		{
+			return;
+		}
+
+		const float DesiredSlotYaw = GetPlanarYawDegrees(DesiredSlotDirection);
+		FRotator NewRotation = Atom->GetActorRotation();
+		NewRotation.Pitch = 0.f;
+		NewRotation.Roll = 0.f;
+		NewRotation.Yaw = DesiredSlotYaw - Atom->GetSlotBaseAngleDegrees(SlotIndex);
+		Atom->SetActorRotation(NewRotation);
+		Atom->ConstrainToGameplayPlane();
+	};
+
+	if (bAtomAAnchored && !bAtomBAnchored)
+	{
+		SetAtomYawForSlotDirection(AtomB, AtomBSlot, -DirectionFromAToB);
+	}
+	else if (bAtomBAnchored && !bAtomAAnchored)
+	{
+		SetAtomYawForSlotDirection(AtomA, AtomASlot, DirectionFromAToB);
+	}
+	else
+	{
+		SetAtomYawForSlotDirection(AtomA, AtomASlot, DirectionFromAToB);
+		SetAtomYawForSlotDirection(AtomB, AtomBSlot, -DirectionFromAToB);
+	}
+
+	const float TargetSlotDistance =
+		(FMath::Max(AtomA->GetSlotConnectionDistance(), 1.f) + FMath::Max(AtomB->GetSlotConnectionDistance(), 1.f)) * 0.5f;
+	const FVector TargetDelta = DirectionFromAToB * TargetSlotDistance;
+	const FVector AtomASlotLocation = AtomA->GetSlotWorldLocation(AtomASlot);
+	const FVector AtomBSlotLocation = AtomB->GetSlotWorldLocation(AtomBSlot);
+
+	if (bAtomAAnchored && !bAtomBAnchored)
+	{
+		const FVector DesiredAtomBSlotLocation = AtomASlotLocation + TargetDelta;
+		AtomB->SetActorLocation(
+			ChemicalBondGameplayPlane::ProjectLocation(AtomB->GetActorLocation() + DesiredAtomBSlotLocation - AtomBSlotLocation),
+			false);
+		StopConstrainedAtomMotion(AtomB);
+	}
+	else if (bAtomBAnchored && !bAtomAAnchored)
+	{
+		const FVector DesiredAtomASlotLocation = AtomBSlotLocation - TargetDelta;
+		AtomA->SetActorLocation(
+			ChemicalBondGameplayPlane::ProjectLocation(AtomA->GetActorLocation() + DesiredAtomASlotLocation - AtomASlotLocation),
+			false);
+		StopConstrainedAtomMotion(AtomA);
+	}
+	else
+	{
+		const FVector CurrentDelta = AtomBSlotLocation - AtomASlotLocation;
+		const FVector Correction = ChemicalBondGameplayPlane::ProjectVector(CurrentDelta - TargetDelta);
+		const float AtomAMass = FMath::Max(AtomA->GetMass(), 1.f);
+		const float AtomBMass = FMath::Max(AtomB->GetMass(), 1.f);
+		const float TotalMass = AtomAMass + AtomBMass;
+		const float AtomAMoveWeight = AtomBMass / TotalMass;
+		const float AtomBMoveWeight = AtomAMass / TotalMass;
+		AtomA->SetActorLocation(
+			ChemicalBondGameplayPlane::ProjectLocation(AtomA->GetActorLocation() + Correction * AtomAMoveWeight),
+			false);
+		AtomB->SetActorLocation(
+			ChemicalBondGameplayPlane::ProjectLocation(AtomB->GetActorLocation() - Correction * AtomBMoveWeight),
+			false);
+		StopConstrainedAtomMotion(AtomA);
+		StopConstrainedAtomMotion(AtomB);
+	}
+
+	RefreshAtomBondLayouts(AtomA, AtomB);
+	UE_LOG(LogChemicalBondDirector, VeryVerbose,
+		TEXT("[Game:Connection] Slot alignment applied. AtomA=%s SlotA=%d AtomB=%s SlotB=%d Reason=%s"),
+		*GetNameSafe(AtomA),
+		AtomASlot,
+		*GetNameSafe(AtomB),
+		AtomBSlot,
+		Reason ? Reason : TEXT("Unknown"));
+}
+
+void AChemicalBondGameDirector::RefreshAtomBondLayouts(AAtomBase* AtomA, AAtomBase* AtomB) const
+{
+	if (AtomA)
+	{
+		AtomA->NotifyBondLayoutChanged();
+	}
+	if (AtomB)
+	{
+		AtomB->NotifyBondLayoutChanged();
+	}
+}
+
+void AChemicalBondGameDirector::SpawnOrUpdateBondVisual(FGuid BondUid)
+{
+	if (!BondUid.IsValid())
+	{
+		return;
+	}
+	if (!BondVisualSystem)
+	{
+		UE_LOG(LogChemicalBondDirector, Warning,
+			TEXT("[Game:Connection] Bond visual skipped because BondVisualSystem is null. BondUid=%s"),
+			*BondUid.ToString());
+		return;
+	}
+
+	FChemicalBondRegistryRecord* Record = BondRegistry.Find(BondUid);
+	if (!Record)
+	{
+		return;
+	}
+
+	AAtomBase* AtomA = Record->AtomA.Get();
+	AAtomBase* AtomB = Record->AtomB.Get();
+	if (!AtomA)
+	{
+		return;
+	}
+	if (!AtomB)
+	{
+		return;
+	}
+
+	TArray<int32> AtomASlotIndices;
+	TArray<int32> AtomBSlotIndices;
+	for (const FBondRecord& AtomABondRecord : AtomA->GetBonds())
+	{
+		if (AtomABondRecord.BondUid == BondUid)
+		{
+			AtomASlotIndices = AtomABondRecord.MySlotIndices;
+			AtomBSlotIndices = AtomABondRecord.PartnerSlotIndices;
+			break;
+		}
+	}
+
+	if (AtomASlotIndices.Num() <= 0 || AtomBSlotIndices.Num() <= 0)
+	{
+		AtomASlotIndices.Reset();
+		AtomBSlotIndices.Reset();
+		AtomASlotIndices.Add(Record->AtomASlotIndex);
+		AtomBSlotIndices.Add(Record->AtomBSlotIndex);
+	}
+
+	FVector BondDirection =
+		ChemicalBondGameplayPlane::ProjectLocation(AtomB->GetActorLocation()) -
+		ChemicalBondGameplayPlane::ProjectLocation(AtomA->GetActorLocation());
+	BondDirection = ChemicalBondGameplayPlane::ProjectVector(BondDirection);
+	if (BondDirection.IsNearlyZero())
+	{
+		BondDirection = FVector::ForwardVector;
+	}
+	BondDirection = BondDirection.GetSafeNormal();
+
+	const FVector BondSideAxis(-BondDirection.Y, BondDirection.X, 0.f);
+	AtomASlotIndices.Sort([AtomA, BondSideAxis](const int32 LeftSlotIndex, const int32 RightSlotIndex)
+	{
+		return FVector::DotProduct(AtomA->GetSlotWorldLocation(LeftSlotIndex), BondSideAxis)
+			< FVector::DotProduct(AtomA->GetSlotWorldLocation(RightSlotIndex), BondSideAxis);
+	});
+	AtomBSlotIndices.Sort([AtomB, BondSideAxis](const int32 LeftSlotIndex, const int32 RightSlotIndex)
+	{
+		return FVector::DotProduct(AtomB->GetSlotWorldLocation(LeftSlotIndex), BondSideAxis)
+			< FVector::DotProduct(AtomB->GetSlotWorldLocation(RightSlotIndex), BondSideAxis);
+	});
+
+	const int32 RequiredVisualCount = FMath::Min(AtomASlotIndices.Num(), AtomBSlotIndices.Num());
+	FBondVisualComponentList& VisualComponentList = BondVisualComponents.FindOrAdd(BondUid);
+	while (VisualComponentList.Components.Num() > RequiredVisualCount)
+	{
+		TObjectPtr<UNiagaraComponent> ExtraComponent = VisualComponentList.Components.Pop();
+		if (ExtraComponent)
+		{
+			ExtraComponent->Deactivate();
+			ExtraComponent->DestroyComponent();
+		}
+	}
+	if (VisualComponentList.Components.Num() < RequiredVisualCount)
+	{
+		VisualComponentList.Components.SetNum(RequiredVisualCount);
+	}
+
+	for (int32 VisualIndex = 0; VisualIndex < RequiredVisualCount; ++VisualIndex)
+	{
+		const FVector StartLocation = AtomA->GetSlotWorldLocation(AtomASlotIndices[VisualIndex]);
+		const FVector EndLocation = AtomB->GetSlotWorldLocation(AtomBSlotIndices[VisualIndex]);
+
+		UNiagaraComponent* BondVisualComponent = nullptr;
+		if (VisualComponentList.Components.IsValidIndex(VisualIndex))
+		{
+			BondVisualComponent = VisualComponentList.Components[VisualIndex].Get();
+		}
+
+		if (!BondVisualComponent)
+		{
+			BondVisualComponent = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+				GetWorld(),
+				BondVisualSystem,
+				(StartLocation + EndLocation) * 0.5f,
+				FRotator::ZeroRotator,
+				FVector::OneVector,
+				false,
+				true,
+				ENCPoolMethod::None,
+				true);
+			if (!BondVisualComponent)
+			{
+				continue;
+			}
+
+			VisualComponentList.Components[VisualIndex] = BondVisualComponent;
+		}
+
+		BondVisualComponent->SetWorldLocation((StartLocation + EndLocation) * 0.5f);
+		BondVisualComponent->SetVariableVec3(FName(TEXT("start")), StartLocation);
+		BondVisualComponent->SetVariableVec3(FName(TEXT("end")), EndLocation);
+	}
+}
+
+void AChemicalBondGameDirector::UpdateAllBondVisuals()
+{
+	for (const TPair<FGuid, FChemicalBondRegistryRecord>& BondPair : BondRegistry)
+	{
+		SpawnOrUpdateBondVisual(BondPair.Key);
+	}
+}
+
+void AChemicalBondGameDirector::DestroyBondVisual(FGuid BondUid)
+{
+	FBondVisualComponentList ExistingComponents;
+	if (!BondVisualComponents.RemoveAndCopyValue(BondUid, ExistingComponents))
+	{
+		return;
+	}
+
+	for (TObjectPtr<UNiagaraComponent>& BondVisualComponent : ExistingComponents.Components)
+	{
+		if (BondVisualComponent)
+		{
+			BondVisualComponent->Deactivate();
+			BondVisualComponent->DestroyComponent();
+		}
+	}
+}
+
+void AChemicalBondGameDirector::SpawnOrUpdateActiveDecisionWarningVisual()
+{
+	if (!bHasActiveDecisionRequest)
+	{
+		DestroyActiveDecisionWarningVisual();
+		return;
+	}
+
+	AAtomBase* ConnectedAtom = ActiveDecisionRequest.ConnectedAtom.Get();
+	AAtomBase* FreeAtom = ActiveDecisionRequest.FreeAtom.Get();
+	if (!ConnectedAtom)
+	{
+		DestroyActiveDecisionWarningVisual();
+		return;
+	}
+	if (!FreeAtom)
+	{
+		DestroyActiveDecisionWarningVisual();
+		return;
+	}
+	if (ConnectedAtom->GetAtomState() != EAtomState::PlayerConnected || FreeAtom->GetAtomState() != EAtomState::PendingDecision)
+	{
+		DestroyActiveDecisionWarningVisual();
+		return;
+	}
+	if (!DecisionWarningVisualSystem)
+	{
+		return;
+	}
+
+	const FVector WarningLocation = ChemicalBondGameplayPlane::ProjectLocation(ConnectedAtom->GetActorLocation());
+	const float WarningLifetime = FMath::Max(ActiveDecisionRequest.RemainingDecisionSeconds, 0.f);
+	const float WarningRadius = ConnectedAtom->GetProximityRadius();
+	bool bCreatedWarningComponent = false;
+	if (!ActiveDecisionWarningComponent)
+	{
+		ActiveDecisionWarningComponent = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			DecisionWarningVisualSystem,
+			WarningLocation,
+			FRotator::ZeroRotator,
+			FVector::OneVector,
+			false,
+			false,
+			ENCPoolMethod::None,
+			true);
+		if (!ActiveDecisionWarningComponent)
+		{
+			return;
+		}
+
+		bCreatedWarningComponent = true;
+	}
+
+	if (ActiveDecisionWarningComponent->GetAttachParent())
+	{
+		ActiveDecisionWarningComponent->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+	}
+
+	ActiveDecisionWarningComponent->SetWorldLocation(WarningLocation);
+	ActiveDecisionWarningComponent->SetWorldRotation(FRotator::ZeroRotator);
+	ActiveDecisionWarningComponent->SetWorldScale3D(FVector::OneVector);
+	ActiveDecisionWarningComponent->SetVariableFloat(FName(TEXT("lifetime")), WarningLifetime);
+	ActiveDecisionWarningComponent->SetVariableFloat(FName(TEXT("radiu")), WarningRadius);
+	ActiveDecisionWarningComponent->SetVariableFloat(FName(TEXT("User.lifetime")), WarningLifetime);
+	ActiveDecisionWarningComponent->SetVariableFloat(FName(TEXT("User.radiu")), WarningRadius);
+	ActiveDecisionWarningComponent->SetNiagaraVariableFloat(TEXT("User.lifetime"), WarningLifetime);
+	ActiveDecisionWarningComponent->SetNiagaraVariableFloat(TEXT("User.radiu"), WarningRadius);
+	if (bCreatedWarningComponent || !ActiveDecisionWarningComponent->IsActive())
+	{
+		ActiveDecisionWarningComponent->Activate(true);
+	}
+}
+
+void AChemicalBondGameDirector::DestroyActiveDecisionWarningVisual()
+{
+	if (!ActiveDecisionWarningComponent)
+	{
+		return;
+	}
+
+	ActiveDecisionWarningComponent->Deactivate();
+	ActiveDecisionWarningComponent->DestroyComponent();
+	ActiveDecisionWarningComponent = nullptr;
 }
 
 void AChemicalBondGameDirector::SettleConnectionCandidate(const FAtomConnectionCandidate& Candidate)
@@ -1282,14 +1801,15 @@ void AChemicalBondGameDirector::SettleConnectionCandidate(const FAtomConnectionC
 			return;
 		}
 
-		const int32 AtomASlot = AtomA->FindFreeSlotIndex();
-		const int32 AtomBSlot = AtomB->FindFreeSlotIndex();
-		if (AtomASlot == INDEX_NONE || AtomBSlot == INDEX_NONE)
+		int32 AtomASlot = INDEX_NONE;
+		int32 AtomBSlot = INDEX_NONE;
+		if (!FindClosestFreeSlotPair(AtomA, AtomB, AtomASlot, AtomBSlot))
 		{
 			ApplyGentleRepulsion(AtomA, AtomB, TEXT("NoFreeSlot"));
 			return;
 		}
 
+		AlignAtomsForSlotConnection(AtomA, AtomASlot, AtomB, AtomBSlot, TEXT("FreeAutoLink"));
 		const FGuid BondUid = LinkAtoms(AtomA, AtomB, EBondType::Single, AtomASlot, AtomBSlot);
 		UE_LOG(LogChemicalBondDirector, Log,
 			TEXT("[Game:Connection] Free atoms auto-linked with single bond. AtomA=%s AtomB=%s BondUid=%s"),
@@ -1403,7 +1923,14 @@ void AChemicalBondGameDirector::StartNextDecisionRequest()
 		}
 
 		LockAtom(ConnectedAtom);
+		int32 ConnectedSlot = INDEX_NONE;
+		int32 FreeSlot = INDEX_NONE;
+		if (FindClosestFreeSlotPair(ConnectedAtom, FreeAtom, ConnectedSlot, FreeSlot))
+		{
+			AlignAtomsForSlotConnection(ConnectedAtom, ConnectedSlot, FreeAtom, FreeSlot, TEXT("DecisionActivated"));
+		}
 		bHasActiveDecisionRequest = true;
+		SpawnOrUpdateActiveDecisionWarningVisual();
 		UE_LOG(LogChemicalBondDirector, Log,
 			TEXT("[Game:Connection] Decision activated. ConnectedAtom=%s FreeAtom=%s Pair=(%s,%s) Window=%.2f"),
 			*GetNameSafe(ConnectedAtom),
@@ -1425,6 +1952,7 @@ void AChemicalBondGameDirector::FinishActiveDecision(bool bRejected)
 	AAtomBase* ConnectedAtom = ActiveDecisionRequest.ConnectedAtom.Get();
 	AAtomBase* FreeAtom = ActiveDecisionRequest.FreeAtom.Get();
 	const bool bHasFormedBond = ActiveDecisionRequest.bHasFormedBond;
+	DestroyActiveDecisionWarningVisual();
 
 	if (FreeAtom)
 	{
@@ -1478,14 +2006,15 @@ bool AChemicalBondGameDirector::TryAdvanceActiveDecisionBond()
 
 	if (!BondUid.IsValid())
 	{
-		const int32 ConnectedSlot = ConnectedAtom->FindFreeSlotIndex();
-		const int32 FreeSlot = FreeAtom->FindFreeSlotIndex();
-		if (ConnectedSlot == INDEX_NONE || FreeSlot == INDEX_NONE)
+		int32 ConnectedSlot = INDEX_NONE;
+		int32 FreeSlot = INDEX_NONE;
+		if (!FindClosestFreeSlotPair(ConnectedAtom, FreeAtom, ConnectedSlot, FreeSlot))
 		{
 			FinishActiveDecision(false);
 			return false;
 		}
 
+		AlignAtomsForSlotConnection(ConnectedAtom, ConnectedSlot, FreeAtom, FreeSlot, TEXT("DecisionSingleBond"));
 		ActiveDecisionRequest.BondUid = LinkAtoms(
 			ConnectedAtom,
 			FreeAtom,
@@ -1501,15 +2030,16 @@ bool AChemicalBondGameDirector::TryAdvanceActiveDecisionBond()
 	}
 	else if (CurrentBondType == EBondType::Single || CurrentBondType == EBondType::Double)
 	{
-		const int32 ConnectedSlot = ConnectedAtom->FindFreeSlotIndex();
-		const int32 FreeSlot = FreeAtom->FindFreeSlotIndex();
-		if (ConnectedSlot == INDEX_NONE || FreeSlot == INDEX_NONE)
+		int32 ConnectedSlot = INDEX_NONE;
+		int32 FreeSlot = INDEX_NONE;
+		if (!FindClosestFreeSlotPair(ConnectedAtom, FreeAtom, ConnectedSlot, FreeSlot))
 		{
 			FinishActiveDecision(false);
 			return false;
 		}
 
 		const EBondType NewBondType = CurrentBondType == EBondType::Single ? EBondType::Double : EBondType::Triple;
+		AlignAtomsForSlotConnection(ConnectedAtom, ConnectedSlot, FreeAtom, FreeSlot, TEXT("DecisionBondUpgrade"));
 		if (!ChangeBondType(BondUid, NewBondType, ConnectedSlot, FreeSlot))
 		{
 			UE_LOG(LogChemicalBondDirector, Warning,
@@ -1582,6 +2112,8 @@ bool AChemicalBondGameDirector::ChangeBondType(
 	AddBondUidToTypeList(BondUid, NewBondType);
 	Record->BondType = NewBondType;
 
+	RefreshAtomBondLayouts(AtomA, AtomB);
+	SpawnOrUpdateBondVisual(BondUid);
 	AssertBondRegistryConsistency();
 	return true;
 }
@@ -1679,6 +2211,25 @@ void AChemicalBondGameDirector::ApplyFixedConnectionConstraint(AAtomBase* AtomA,
 
 	AtomA->ConstrainToGameplayPlane();
 	AtomB->ConstrainToGameplayPlane();
+
+	FGuid ExistingBondUid;
+	EBondType ExistingBondType = EBondType::Single;
+	if (FindExistingBondBetween(AtomA, AtomB, ExistingBondUid, ExistingBondType))
+	{
+		bool bFoundRecord = false;
+		const FChemicalBondRegistryRecord Record = GetBondRecord(ExistingBondUid, bFoundRecord);
+		if (bFoundRecord)
+		{
+			AlignAtomsForSlotConnection(
+				Record.AtomA.Get(),
+				Record.AtomASlotIndex,
+				Record.AtomB.Get(),
+				Record.AtomBSlotIndex,
+				Reason);
+			SpawnOrUpdateBondVisual(ExistingBondUid);
+			return;
+		}
+	}
 
 	const FVector AtomALocation = ChemicalBondGameplayPlane::ProjectLocation(AtomA->GetActorLocation());
 	const FVector AtomBLocation = ChemicalBondGameplayPlane::ProjectLocation(AtomB->GetActorLocation());

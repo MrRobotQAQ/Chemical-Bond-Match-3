@@ -10,6 +10,8 @@
 class UCameraComponent;
 class AAtomBase;
 class AChemicalBondGameMode;
+class UNiagaraComponent;
+class UNiagaraSystem;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogChemicalBondDirector, Log, All);
 
@@ -92,6 +94,15 @@ struct FAtomDecisionRequest
 	float RemainingDecisionSeconds = 0.f;
 	FGuid BondUid;
 	bool bHasFormedBond = false;
+};
+
+USTRUCT()
+struct FBondVisualComponentList
+{
+	GENERATED_BODY()
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UNiagaraComponent>> Components;
 };
 
 // 单局规则编排入口，负责局内系统生命周期、原子/化学键注册表、连接决策队列和临时基团物理连接。
@@ -260,6 +271,22 @@ private:
 
 	TMap<FGuid, TMap<FGuid, FTransform>> RigidGroupLocalTransforms;
 
+	UPROPERTY(Transient)
+	TMap<FGuid, FBondVisualComponentList> BondVisualComponents;
+
+	// 蓝图配置：Class=GameDirector 派生类，Range=NiagaraSystem 资源，
+	// Effect=化学键成键时生成的线状特效，参数 start/end 使用槽位中心世界坐标。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="ChemicalBond|Presentation", meta=(AllowPrivateAccess="true"))
+	TObjectPtr<UNiagaraSystem> BondVisualSystem = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraComponent> ActiveDecisionWarningComponent = nullptr;
+
+	// 蓝图配置：Class=GameDirector 派生类，Range=NiagaraSystem 资源，
+	// Effect=玩家基团参与待决策时，在已连接原子中心生成的倒计时警示特效。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="ChemicalBond|Presentation", meta=(AllowPrivateAccess="true"))
+	TObjectPtr<UNiagaraSystem> DecisionWarningVisualSystem = nullptr;
+
 	FGuid GenerateUniqueAtomUid() const;
 	FGuid GenerateUniqueBondUid() const;
 	void RegisterExistingAtomsInWorld();
@@ -290,6 +317,14 @@ private:
 		const TSet<FAtomInteractionPairKey>& HandledPairKeys,
 		const TCHAR* Reason);
 	void ApplyConnectionPullConstraint(AAtomBase* AnchorAtom, AAtomBase* PulledAtom, const TCHAR* Reason);
+	bool FindClosestFreeSlotPair(AAtomBase* AtomA, AAtomBase* AtomB, int32& OutAtomASlot, int32& OutAtomBSlot) const;
+	void AlignAtomsForSlotConnection(AAtomBase* AtomA, int32 AtomASlot, AAtomBase* AtomB, int32 AtomBSlot, const TCHAR* Reason);
+	void RefreshAtomBondLayouts(AAtomBase* AtomA, AAtomBase* AtomB) const;
+	void SpawnOrUpdateBondVisual(FGuid BondUid);
+	void UpdateAllBondVisuals();
+	void DestroyBondVisual(FGuid BondUid);
+	void SpawnOrUpdateActiveDecisionWarningVisual();
+	void DestroyActiveDecisionWarningVisual();
 	void SettleConnectionCandidate(const FAtomConnectionCandidate& Candidate);
 	void EnqueueDecisionRequest(AAtomBase* ConnectedAtom, AAtomBase* FreeAtom, const FAtomInteractionPairKey& PairKey);
 	void StartNextDecisionRequest();

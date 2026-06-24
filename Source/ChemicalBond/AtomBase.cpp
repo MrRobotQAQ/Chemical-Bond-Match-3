@@ -43,6 +43,20 @@ AAtomBase::AAtomBase()
         ProximityVisualMesh->SetMaterial(0, RangeMaterial.Object);
     }
 
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> SlotMesh(
+        TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+    if (SlotMesh.Succeeded())
+    {
+        SlotSphereMesh = SlotMesh.Object;
+    }
+
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> SlotMaterial(
+        TEXT("/Engine/EngineDebugMaterials/M_SimpleUnlit.M_SimpleUnlit"));
+    if (SlotMaterial.Succeeded())
+    {
+        SlotVisualMaterial = SlotMaterial.Object;
+    }
+
     FluidMotionComponent = CreateDefaultSubobject<UFluidMotionComponent>(TEXT("FluidMotionComponent"));
 }
 
@@ -51,6 +65,7 @@ void AAtomBase::BeginPlay()
     Super::BeginPlay();
     ConstrainToGameplayPlane();
     InitFromDataTable();
+    RebuildSlotVisualMeshes();
 
     ProximitySphere->SetSphereRadius(ProximityRadius);
     RefreshProximityVisual();
@@ -66,6 +81,7 @@ void AAtomBase::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
     ConstrainToGameplayPlane();
+    RefreshSlotVisualLayout();
     DrawProximityIndicator();
 }
 
@@ -123,6 +139,7 @@ void AAtomBase::ApplyRuntimeAtomData(EAtomElementType InElementType, float InMas
     bCanFormRing = bInCanFormRing;
 
     SlotOccupied.Init(false, TotalSlots);
+    RebuildSlotVisualMeshes();
     ApplyTemporaryInteractionRadiusFromMass();
 
     if (FluidMotionComponent)
@@ -146,6 +163,11 @@ int32 AAtomBase::GetAvailableSlotCount() const
     return Count;
 }
 
+bool AAtomBase::IsSlotOccupied(int32 SlotIndex) const
+{
+    return SlotOccupied.IsValidIndex(SlotIndex) && SlotOccupied[SlotIndex];
+}
+
 int32 AAtomBase::FindFreeSlotIndex() const
 {
     for (int32 i = 0; i < SlotOccupied.Num(); ++i)
@@ -153,6 +175,31 @@ int32 AAtomBase::FindFreeSlotIndex() const
         if (!SlotOccupied[i]) return i;
     }
     return INDEX_NONE;
+}
+
+int32 AAtomBase::FindNearestFreeSlotIndexToWorldLocation(FVector WorldLocation) const
+{
+    int32 BestSlotIndex = INDEX_NONE;
+    float BestDistanceSquared = TNumericLimits<float>::Max();
+
+    for (int32 SlotIndex = 0; SlotIndex < SlotOccupied.Num(); ++SlotIndex)
+    {
+        if (SlotOccupied[SlotIndex])
+        {
+            continue;
+        }
+
+        const float DistanceSquared = FVector::DistSquared(
+            GetSlotWorldLocation(SlotIndex),
+            ChemicalBondGameplayPlane::ProjectLocation(WorldLocation));
+        if (DistanceSquared < BestDistanceSquared)
+        {
+            BestDistanceSquared = DistanceSquared;
+            BestSlotIndex = SlotIndex;
+        }
+    }
+
+    return BestSlotIndex;
 }
 
 bool AAtomBase::AddBond(AAtomBase* Partner, EBondType InBondType, int32 MySlot, int32 PartnerSlot)
@@ -346,6 +393,34 @@ void AAtomBase::BeginInteractionCooldown(float CooldownSeconds)
         World->GetTimeSeconds() + FMath::Max(0.f, CooldownSeconds));
 }
 
+void AAtomBase::RefreshSlotVisualLayout()
+{
+    if (SlotVisualMeshes.Num() != TotalSlots)
+    {
+        RebuildSlotVisualMeshes();
+    }
+
+    const float SlotDiameter = FMath::Max(AtomBodyDiameter * SlotSphereDiameterRatio, 1.f);
+    const float SlotScale = SlotDiameter / 100.f;
+    for (int32 SlotIndex = 0; SlotIndex < SlotVisualMeshes.Num(); ++SlotIndex)
+    {
+        UStaticMeshComponent* SlotMeshComponent = SlotVisualMeshes[SlotIndex].Get();
+        if (!SlotMeshComponent)
+        {
+            continue;
+        }
+
+        SlotMeshComponent->SetRelativeLocation(GetSlotRelativeLocation(SlotIndex));
+        SlotMeshComponent->SetRelativeScale3D(FVector(SlotScale));
+        SlotMeshComponent->SetVisibility(true, true);
+    }
+}
+
+void AAtomBase::NotifyBondLayoutChanged()
+{
+    RefreshSlotVisualLayout();
+}
+
 bool AAtomBase::IsInteractionCoolingDown() const
 {
     const UWorld* World = GetWorld();
@@ -365,6 +440,29 @@ bool AAtomBase::IsProximityOverlappingAtom(AAtomBase* OtherAtom) const
     }
 
     return ProximitySphere->IsOverlappingActor(OtherAtom);
+}
+
+FVector AAtomBase::GetSlotWorldLocation(int32 SlotIndex) const
+{
+    const FVector SlotLocation = GetActorLocation() + GetSlotWorldOffset(SlotIndex);
+    return ChemicalBondGameplayPlane::ProjectLocation(SlotLocation);
+}
+
+FVector AAtomBase::GetSlotWorldOffset(int32 SlotIndex) const
+{
+    const FVector RelativeLocation = GetSlotRelativeLocation(SlotIndex);
+    return ChemicalBondGameplayPlane::ProjectVector(
+        GetActorTransform().TransformVectorNoScale(RelativeLocation));
+}
+
+float AAtomBase::GetSlotBaseAngleDegrees(int32 SlotIndex) const
+{
+    if (TotalSlots <= 0 || SlotIndex < 0 || SlotIndex >= TotalSlots)
+    {
+        return 0.f;
+    }
+
+    return static_cast<float>(SlotIndex) * 360.f / static_cast<float>(TotalSlots);
 }
 
 void AAtomBase::ConstrainToGameplayPlane()
@@ -433,6 +531,114 @@ void AAtomBase::DrawProximityIndicator()
         FVector::ForwardVector,
         FVector::RightVector,
         false);
+}
+
+void AAtomBase::RebuildSlotVisualMeshes()
+{
+    if (HasAnyFlags(RF_ClassDefaultObject) || !GetWorld())
+    {
+        return;
+    }
+
+    for (TObjectPtr<UStaticMeshComponent>& SlotMeshComponent : SlotVisualMeshes)
+    {
+        if (SlotMeshComponent)
+        {
+            SlotMeshComponent->DestroyComponent();
+        }
+    }
+    SlotVisualMeshes.Reset();
+
+    if (TotalSlots <= 0 || !RootComponent)
+    {
+        return;
+    }
+
+    for (int32 SlotIndex = 0; SlotIndex < TotalSlots; ++SlotIndex)
+    {
+        const FName ComponentName = *FString::Printf(TEXT("SlotVisual_%d"), SlotIndex);
+        UStaticMeshComponent* SlotMeshComponent = NewObject<UStaticMeshComponent>(this, ComponentName);
+        if (!SlotMeshComponent)
+        {
+            continue;
+        }
+
+        SlotMeshComponent->SetupAttachment(RootComponent);
+        SlotMeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        SlotMeshComponent->SetGenerateOverlapEvents(false);
+        SlotMeshComponent->SetCastShadow(false);
+        if (SlotSphereMesh)
+        {
+            SlotMeshComponent->SetStaticMesh(SlotSphereMesh);
+        }
+        if (SlotVisualMaterial)
+        {
+            SlotMeshComponent->SetMaterial(0, SlotVisualMaterial);
+        }
+        SlotMeshComponent->RegisterComponent();
+        SlotVisualMeshes.Add(SlotMeshComponent);
+    }
+
+    RefreshSlotVisualLayout();
+}
+
+FVector AAtomBase::GetSlotRelativeLocation(int32 SlotIndex) const
+{
+    float AngleDegrees = GetSlotBaseAngleDegrees(SlotIndex);
+    TryGetMultiBondSlotAngleDegrees(SlotIndex, AngleDegrees);
+
+    const float AngleRadians = FMath::DegreesToRadians(AngleDegrees);
+    const float SafeOrbitDistance = FMath::Max(SlotOrbitDistance, 0.f);
+    return FVector(
+        FMath::Cos(AngleRadians) * SafeOrbitDistance,
+        FMath::Sin(AngleRadians) * SafeOrbitDistance,
+        0.f);
+}
+
+bool AAtomBase::TryGetMultiBondSlotAngleDegrees(int32 SlotIndex, float& OutAngleDegrees) const
+{
+    for (const FBondRecord& BondRecord : Bonds)
+    {
+        if (BondRecord.BondType == EBondType::Single || !BondRecord.MySlotIndices.Contains(SlotIndex))
+        {
+            continue;
+        }
+
+        const AAtomBase* PartnerAtom = BondRecord.PartnerAtom.Get();
+        if (!PartnerAtom)
+        {
+            continue;
+        }
+
+        FVector DirectionToPartner =
+            ChemicalBondGameplayPlane::ProjectLocation(PartnerAtom->GetActorLocation()) -
+            ChemicalBondGameplayPlane::ProjectLocation(GetActorLocation());
+        DirectionToPartner = ChemicalBondGameplayPlane::ProjectVector(DirectionToPartner);
+        if (DirectionToPartner.IsNearlyZero())
+        {
+            DirectionToPartner = FVector::ForwardVector;
+        }
+
+        const FVector LocalDirection = GetActorTransform().InverseTransformVectorNoScale(
+            DirectionToPartner.GetSafeNormal());
+        const float FacingAngleDegrees = FMath::RadiansToDegrees(FMath::Atan2(LocalDirection.Y, LocalDirection.X));
+
+        TArray<int32> SortedSlots = BondRecord.MySlotIndices;
+        SortedSlots.Sort();
+        const int32 SlotOrder = SortedSlots.IndexOfByKey(SlotIndex);
+        const int32 SlotCount = SortedSlots.Num();
+        if (SlotOrder == INDEX_NONE || SlotCount <= 1)
+        {
+            OutAngleDegrees = FacingAngleDegrees;
+            return true;
+        }
+
+        const float CenteredOrder = static_cast<float>(SlotOrder) - (static_cast<float>(SlotCount - 1) * 0.5f);
+        OutAngleDegrees = FacingAngleDegrees + CenteredOrder * MultiBondSlotSpreadDegrees;
+        return true;
+    }
+
+    return false;
 }
 
 void AAtomBase::TryRegisterWithDirector()
