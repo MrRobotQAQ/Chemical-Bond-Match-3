@@ -112,6 +112,8 @@ AChemicalBondGameDirector::AChemicalBondGameDirector()
 void AChemicalBondGameDirector::BeginPlay()
 {
 	Super::BeginPlay();
+	
+
 }
 
 void AChemicalBondGameDirector::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -914,7 +916,7 @@ FVector AChemicalBondGameDirector::GetAtomLifeRegionBoxRange(UCameraComponent* C
 }
 
 
-TArray<FRefreshRegionInfo> AChemicalBondGameDirector::GetAllGridRegions(UCameraComponent* Camera, float SpringArmLength,
+TArray<FRefreshRegionInfo> AChemicalBondGameDirector::GetAllGridRegionsInfoAtAtomLifeRegion(UCameraComponent* Camera, float SpringArmLength,
 	float DeltaTime)
 {
 	TArray<FRefreshRegionInfo> RegionInfos;
@@ -925,6 +927,85 @@ TArray<FRefreshRegionInfo> AChemicalBondGameDirector::GetAllGridRegions(UCameraC
 	}
 	return RegionInfos;
 }
+
+uint8 AChemicalBondGameDirector::GetNextMainGuideRegionIndex(const TArray<FRefreshRegionInfo>& RefreshRegionInfos,uint8 LocalCurrentMainGuideIndex)
+{
+	if (RefreshRegionInfos.IsValidIndex(LocalCurrentMainGuideIndex))
+	{
+		FRefreshRegionInfo MainRegionInfo= RefreshRegionInfos[LocalCurrentMainGuideIndex];
+		FRefreshRegionInfo CentrallySymmetricRegionInfo=RefreshRegionInfos[MainRegionInfo.CentrallySymmetricRegionIndex];
+		
+		TArray<AActor*> AllAtoms;
+		UGameplayStatics::GetAllActorsOfClass(this,AAtomBase::StaticClass(),AllAtoms);
+
+		if (!UGameplayStatics::GetPlayerPawn(this,0))
+		{
+			return -1;
+		}
+		FVector PlayerLocation=UGameplayStatics::GetPlayerPawn(this,0)->GetActorLocation();
+		
+		uint8 NextCanChooseRegionIndex_1=CentrallySymmetricRegionInfo.SubGuideRegionIndex[0];
+		uint8 NextCanChooseRegionIndex_2=CentrallySymmetricRegionInfo.SubGuideRegionIndex[1];
+
+		uint8 RegionIndex_1_AtomNum=0;
+		uint8 RegionIndex_2_AtomNum=0;
+		
+		for (auto Atom : AllAtoms)
+		{
+			if (Atom)
+			{
+				FVector CheckLocation=Atom->GetActorLocation()-PlayerLocation;
+				uint8 Pos=FindRegionIndexByLocation(CheckLocation,RefreshRegionInfos);
+				if (NextCanChooseRegionIndex_1==Pos)
+				{
+					RegionIndex_1_AtomNum++;
+				}
+				
+				if (NextCanChooseRegionIndex_2==Pos)
+				{
+					RegionIndex_2_AtomNum++;
+				}
+				
+			}
+			
+		}
+
+		if (RegionIndex_1_AtomNum>RegionIndex_2_AtomNum)
+		{
+			return NextCanChooseRegionIndex_1;
+		}
+		
+		if (RegionIndex_1_AtomNum<RegionIndex_2_AtomNum)
+		{
+			return NextCanChooseRegionIndex_2;
+		}
+		
+		if (RegionIndex_1_AtomNum==RegionIndex_2_AtomNum)
+		{
+			return LocalCurrentMainGuideIndex;
+		}
+		
+	}
+
+	return -1;
+}
+
+void AChemicalBondGameDirector::RefreshRegions(bool bIsRandom, UCameraComponent* Camera, 
+	float SpringArmLength, 
+	float DeltaTime)
+{
+	if (bIsRandom)
+	{
+		// 游戏开始时随机选择一个引导区作为主引导区域
+		CurrentMainGuideIndex=FMath::RandRange(0,7);
+	}
+	
+	TArray<FRefreshRegionInfo> RegionInfos=GetAllGridRegionsInfoAtAtomLifeRegion(Camera,SpringArmLength,DeltaTime);
+	CurrentMainGuideIndex=GetNextMainGuideRegionIndex(RegionInfos,CurrentMainGuideIndex);
+	
+}
+
+
 
 TArray<FRefreshRegionInfo> AChemicalBondGameDirector::Get_8_Regions(FVector Range)
 {
@@ -1037,6 +1118,24 @@ TArray<FRefreshRegionInfo> AChemicalBondGameDirector::Get_8_Regions(FVector Rang
 		
 	return RegionInfos;
 	
+}
+
+uint8 AChemicalBondGameDirector::FindRegionIndexByLocation(FVector TargetLocation,  const TArray<FRefreshRegionInfo>& RefreshRegionInfos)
+{
+	
+	 for (auto RefreshRegionInfo : RefreshRegionInfos)
+	 {
+	 	uint8 Index=0;
+	 	
+		 if (TargetLocation.X>=RefreshRegionInfo.MinRange.X &&TargetLocation.Y>=RefreshRegionInfo.MinRange.Y
+		 	&& TargetLocation.X<=RefreshRegionInfo.MaxRange.X &&TargetLocation.Y<=RefreshRegionInfo.MaxRange.Y)
+		 {
+			 return Index;
+		 }
+	 	
+	 	Index++;
+	 }
+	return -1;
 }
 
 TArray<FVector> AChemicalBondGameDirector::GetGridCenters(const FVector Center, const FVector Extent,FVector& SubBoxExtent)

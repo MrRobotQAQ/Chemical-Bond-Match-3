@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HLSLTypeAliases.h"
 #include "GameFramework/Actor.h"
 #include "../AtomTypes.h"
 #include "ChemicalBondGameDirector.generated.h"
@@ -215,6 +216,7 @@ public:
 	
 	// 计算8个刷新区域
 	
+	// 计算三个区域范围：生存，逻辑，可视范围
 	UFUNCTION(BlueprintCallable, Category="BoxRange")
 	static FVector GetViewBoxRange(UCameraComponent* Camera,float SpringArmLength,float DeltaTime);
 
@@ -226,22 +228,33 @@ public:
 	
 	
 	UFUNCTION(BlueprintCallable, Category="BoxRange")
-	TArray<FRefreshRegionInfo> GetAllGridRegions(UCameraComponent* Camera,float SpringArmLength,float DeltaTime);
+	TArray<FRefreshRegionInfo> GetAllGridRegionsInfoAtAtomLifeRegion(UCameraComponent* Camera,float SpringArmLength,float DeltaTime);
+	
+	UFUNCTION(BlueprintCallable, Category="BoxRange")
+	 uint8 GetNextMainGuideRegionIndex(const TArray<FRefreshRegionInfo>& RefreshRegionInfos,uint8 LocalCurrentMainGuideIndex);
+	
+	// 刷新所有区域
+	UFUNCTION(BlueprintCallable, Category="BoxRange")
+	void RefreshRegions(bool bIsRandom , UCameraComponent* Camera, float SpringArmLength, float DeltaTime);
 	
 	// 生成8个区域信息
 	UFUNCTION(BlueprintCallable, Category="BoxRange")
 	static TArray<FRefreshRegionInfo> Get_8_Regions(FVector Range);
 	
-	//将生存区域拆分为8个区域（去掉中心区域）
+	UFUNCTION(BlueprintCallable, Category="BoxRange")
+	static uint8 FindRegionIndexByLocation(FVector TargetLocation,  const TArray<FRefreshRegionInfo>& RefreshRegionInfos);
+	
+	
+	
+	// 弃用
 	UFUNCTION(BlueprintCallable, Category="BoxRange")
 	static TArray<FVector> GetGridCenters(const FVector Center, const FVector Extent,FVector& SubBoxExtent);
-	
 	UFUNCTION(BlueprintCallable, Category="BoxRange")
 	FVector GetFirstRefreshMainGuideRegion(UCameraComponent* Camera,float SpringArmLength,float DeltaTime,FVector& Extent);
-	
 	UFUNCTION(BlueprintCallable, Category="BoxRange")
 	static void GetAllOtherRegionGuides(TArray<FVector> SubBoxsCenter, const FVector& MainGuide,
 		TArray<FVector>& SubGuide,TArray<FVector>& WeakGuide,TArray<FVector>& NoneGuide);
+	
 	
 	
 	bool ValidateBondRegistryConsistency(FString& OutError) const;
@@ -351,15 +364,34 @@ private:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="ChemicalBond|Presentation", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
 	float DecisionWarningRadiusParameterScale = 2.f;
 
-	// 蓝图配置：Class=GameDirector 派生类，Range=0.01..10.0，
-	// Effect=把可视范围换算为逻辑执行范围的倍率。
+
+	// 刷新逻辑参数
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
 	float LogicRegionBoxScale = 1.2f;
-
-	// 蓝图配置：Class=GameDirector 派生类，Range=0.01..10.0，
-	// Effect=把可视范围换算为原子生存范围的倍率。
+	
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
 	float AtomLifeRegionBoxScale = 2.f;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
+	float Tmin = 0.8f;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
+	float Tmax =1.5f;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
+	float MainGuideRefreshFrequency =0.8f;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
+	float SubGuideRefreshFrequency =0.6f;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
+	float  WeakGuideRefreshFrequency =0.4f;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
+	float   NoneGuideRefreshFrequency =0.2f;
+	
+	UPROPERTY(BlueprintReadOnly, Category="BoxRange", meta=(AllowPrivateAccess="true", ClampMin="0.01"))
+	uint8 CurrentMainGuideIndex;
 
 	FGuid GenerateUniqueAtomUid() const;
 	FGuid GenerateUniqueBondUid() const;
